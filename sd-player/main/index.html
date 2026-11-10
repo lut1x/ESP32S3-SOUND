@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SD Плеер</title>
+<style>
+body{font:17px system-ui;background:#101722;color:#eef4ff;margin:0;padding:24px}main{max-width:1000px;margin:auto}h1{margin-bottom:6px}p{color:#afbed2;line-height:1.5}section{background:#1c2838;border-radius:18px;padding:22px;margin:20px 0}button{font:inherit;border:0;border-radius:10px;padding:12px 18px;background:#68dfb2;color:#09261d;cursor:pointer}button:disabled,select:disabled{opacity:.4;cursor:default}.controls{display:flex;gap:10px;flex-wrap:wrap}input{width:100%;accent-color:#68dfb2}select{width:100%;font:inherit;padding:12px;background:#101722;color:#eef4ff;border:1px solid #506077;border-radius:10px;margin:12px 0}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:1px solid #344155;padding:12px 0}li span{overflow-wrap:anywhere}#message,.line-error{color:#ffcb87;min-height:25px}progress{width:100%;accent-color:#68dfb2}small{color:#afbed2}.players{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.players section{margin:0;min-width:0}.track{overflow-wrap:anywhere}.note{font-size:14px}@media(max-width:700px){.players{grid-template-columns:1fr}body{padding:16px}li{flex-wrap:wrap}}
+</style>
+<main><h1>SD Плеер</h1><p>Две независимые линии · повтор звука по кругу · версия 0.3</p><p id="card">Подключение…</p><p id="message" role="status" aria-live="polite"></p>
+<div class="players">
+<section><h2>Линия I2S 1</h2><small>P2 — левый · P4 — правый<br>BCLK 3 · WS 9 · DATA 14</small><p class="track" id="track-1">Звук не выбран</p><label for="select-1">Звук для этой линии</label><select id="select-1" disabled><option value="">Выберите WAV</option></select><div class="controls"><button id="play-1" disabled>Играть по кругу</button><button id="pause-1" disabled>Пауза</button><button id="stop-1" disabled>Стоп</button></div><p id="state-1">Остановлено</p><progress id="progress-1" value="0" max="1"></progress><p id="time-1">0:00 / 0:00</p><label for="volume-1">Громкость: <b id="level-1">25%</b></label><input id="volume-1" type="range" min="0" max="100" value="25"><p class="line-error" id="error-1" role="status" aria-live="polite"></p><small id="memory-1">Выбор и громкость сохраняются в памяти платы.</small></section>
+<section><h2>Линия I2S 2</h2><small>P3 — левый · P5 — правый<br>BCLK 5 · WS 4 · DATA 6</small><p class="track" id="track-2">Звук не выбран</p><label for="select-2">Звук для этой линии</label><select id="select-2" disabled><option value="">Выберите WAV</option></select><div class="controls"><button id="play-2" disabled>Играть по кругу</button><button id="pause-2" disabled>Пауза</button><button id="stop-2" disabled>Стоп</button></div><p id="state-2">Остановлено</p><progress id="progress-2" value="0" max="1"></progress><p id="time-2">0:00 / 0:00</p><label for="volume-2">Громкость: <b id="level-2">25%</b></label><input id="volume-2" type="range" min="0" max="100" value="25"><p class="line-error" id="error-2" role="status" aria-live="polite"></p><small id="memory-2">Выбор и громкость сохраняются в памяти платы.</small></section>
+</div><p class="note">Нажмите «Играть по кругу», чтобы сохранить выбранный звук. После перезагрузки каждая линия продолжит свой звук с начала. «Стоп» отключает её автозапуск; выбранный файл остаётся в памяти. Пауза также сохраняется.</p>
+<section><div class="controls"><h2 style="margin:0;flex:1">Файлы на карте</h2><button id="refresh">Обновить</button></div><p>WAV · PCM 16 бит · моно или стерео · 8–48 кГц. Файлы положите в корень карты FAT32. Карту вставляйте до включения платы.</p><ul id="files"></ul></section>
+<section><h2>Загрузить музыку</h2><p>Остановите обе линии, выберите WAV на компьютере или телефоне и загрузите его на карту. Существующие файлы не перезаписываются.</p><label for="upload-file">WAV-файл</label><input id="upload-file" type="file" accept=".wav,audio/wav,audio/x-wav"><div class="controls" style="margin-top:16px"><button id="upload" disabled>Загрузить на карту</button><button id="cancel-upload" hidden>Отменить</button></div><progress id="upload-progress" value="0" max="100" style="margin-top:16px"></progress><p id="upload-state" role="status" aria-live="polite"></p></section>
+<section><h2>Подготовка SD-карты</h2><p id="sd-info">Проверка карты…</p><p>Быстрое форматирование создаст один раздел FAT32 на весь доступный объём карты. Все существующие файлы и разделы будут удалены.</p><p>Сначала остановите обе линии. Во время форматирования не отключайте питание и не вынимайте карту.</p><button id="format" disabled style="background:#ffb3a6;color:#43170e">Форматировать в FAT32…</button><p id="format-state" role="status" aria-live="polite"></p><small>Если сама карта не отвечает, форматирование недоступно. Проверьте карту и контакты и перезапустите плату.</small></section></main>
+<script>
+const $=id=>document.getElementById(id);
+let formatting=false, mounted=false, uploading=false, lastResult='', canUpload=false, transfer=null, filesRevision=0;
+let lineStates={}, currentFiles=[], storageBusy=false;
+const drafts={1:null,2:null};
+async function request(url,body){const r=await fetch(url,body?{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{cache:'no-store'});const j=await r.json();if(!r.ok)throw Error(j.error||'Ошибка устройства');return j}
+function message(e){$('message').textContent=e.message}
+const time=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+function updateSelectors(){
+  for(const id of [1,2]){
+    const select=$('select-'+id),chosen=drafts[id]??lineStates[id]?.track??'';
+    if(document.activeElement===select)continue;
+    select.replaceChildren();
+    const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Выберите WAV';select.append(placeholder);
+    for(const name of currentFiles){const option=document.createElement('option');option.value=name;option.textContent=name;select.append(option)}
+    if(chosen&&!currentFiles.includes(chosen)){const option=document.createElement('option');option.value=chosen;option.textContent=chosen+' — нет в списке карты';option.disabled=true;select.append(option)}
+    select.value=chosen;
+  }
+}
+function renderPlayers(){
+  const busy=storageBusy||uploading||formatting;
+  for(const id of [1,2]){
+    const s=lineStates[id]||{},chosen=$('select-'+id).value;
+    $('track-'+id).textContent=s.track||'Звук не выбран';
+    $('state-'+id).textContent=s.playing?(s.paused?'На паузе':`Играет по кругу · повторов: ${s.loops||0}`):'Остановлено';
+    $('select-'+id).disabled=busy||!mounted;
+    $('play-'+id).disabled=busy||!mounted||!currentFiles.includes(chosen);
+    $('pause-'+id).disabled=busy||!s.playing;
+    $('stop-'+id).disabled=busy||(!s.playing&&!s.autoplay);
+    $('pause-'+id).textContent=s.paused?'Продолжить':'Пауза';
+    $('progress-'+id).value=s.duration?s.position/s.duration:0;
+    $('time-'+id).textContent=time(s.position||0)+' / '+time(s.duration||0);
+    $('volume-'+id).disabled=busy;
+    if(document.activeElement!==$('volume-'+id)){$('volume-'+id).value=s.volume??25;$('level-'+id).textContent=(s.volume??25)+'%'}
+    $('error-'+id).textContent=s.error||'';
+    $('memory-'+id).textContent=s.autoplay?(s.paused?'После перезагрузки: выбранный звук на паузе.':'После перезагрузки: автозапуск этого звука по кругу.'):'Автозапуск выключен. Выбранный звук и громкость сохраняются.';
+  }
+}
+async function status(){
+  if(uploading)return;
+  try{
+    const s=await request('/api/status');
+    formatting=s.formatting; mounted=s.mounted;
+    $('card').textContent=formatting?'Идёт форматирование…':s.mounted?'SD-карта подключена':s.detected?'Карта обнаружена, файловая система недоступна':'SD-карта не отвечает';
+    $('sd-info').textContent=s.detected?`Объём: ${s.capacity_mb.toFixed(0)} МБ · SDMMC ${s.bus_width} бит · PSRAM отключена`:'SD-карта не обнаружена.';
+    const busy=formatting||uploading||s.uploading;
+    storageBusy=busy;
+    for(const line of s.lines){
+      lineStates[line.id]=line;
+      if(drafts[line.id]===line.track)drafts[line.id]=null;
+    }
+    const idle=s.idle;
+    $('format').disabled=!s.detected||!idle||busy;
+    $('refresh').disabled=!s.mounted||busy;
+    canUpload=s.mounted&&idle&&!busy;
+    $('upload-file').disabled=busy;
+    $('upload').disabled=!canUpload||!$('upload-file').files.length;
+    for(const b of $('files').querySelectorAll('button'))b.disabled=busy||!s.mounted;
+    if(formatting||!s.mounted)$('files').replaceChildren();
+    $('format-state').textContent=formatting?'Форматирование FAT32… Дождитесь завершения.':s.format_result||'';
+    updateSelectors();renderPlayers();
+    $('message').textContent=s.error||'';
+    if(s.format_result&&s.format_result!==lastResult){lastResult=s.format_result;await files()}
+    if(!s.format_result)lastResult='';
+  }catch(e){message(e)}
+}
+async function command(body){try{await request('/api/control',body);await status()}catch(e){message(e)}}
+async function playLine(id,name){
+  if(!name||!mounted||storageBusy||uploading||formatting)return;
+  drafts[id]=name;
+  await command({action:'play',line:id,file:name});
+}
+async function files(){
+  const revision=++filesRevision;
+  if(formatting||uploading||!mounted)return null;
+  try{
+    const j=await request('/api/files');
+    if(revision!==filesRevision||formatting||uploading||!mounted)return null;
+    currentFiles=j.files;updateSelectors();renderPlayers();
+    $('files').replaceChildren();
+    for(const name of j.files){
+      const li=document.createElement('li'),label=document.createElement('span'),buttons=document.createElement('div');
+      label.textContent=name;buttons.className='controls';
+      for(const id of [1,2]){const b=document.createElement('button');b.textContent='▶ Линия '+id;b.disabled=storageBusy;b.onclick=()=>playLine(id,name);buttons.append(b)}
+      li.append(label,buttons);$('files').append(li);
+    }
+    if(!j.files.length){
+      $('files').textContent=j.other_files?.length?
+        'WAV-файлов в корне нет. Другие файлы: '+j.other_files.join(', '):
+        'В корне карты WAV-файлы не найдены. Загрузите WAV через раздел ниже.';
+    }
+    return j.files;
+  }catch(e){message(e);return null}
+}
+async function formatCard(){
+  if($('format').disabled)return;
+  const answer=prompt('Будут удалены ВСЕ файлы и разделы SD-карты.\nДля форматирования в FAT32 введите: СТЕРЕТЬ');
+  if(answer!=='СТЕРЕТЬ')return;
+  $('format').disabled=true;
+  filesRevision++;
+  try{
+    await request('/api/control',{action:'format',confirmation:'ERASE_SD_CARD'});
+    $('files').replaceChildren();
+    await status();
+  }catch(e){message(e);$('format').disabled=false}
+}
+async function uploadFile(){
+  if($('upload').disabled||uploading)return;
+  const file=$('upload-file').files[0];
+  if(!file)return;
+  if(!/\.wav$/i.test(file.name)){$('upload-state').textContent='Выберите WAV-файл.';return}
+  if(!file.size||file.size>2147483647){$('upload-state').textContent='Файл пуст или превышает 2 ГБ.';return}
+  uploading=true;canUpload=false;
+  filesRevision++;
+  $('upload').disabled=$('upload-file').disabled=$('format').disabled=$('refresh').disabled=true;
+  renderPlayers();
+  for(const b of $('files').querySelectorAll('button'))b.disabled=true;
+  $('cancel-upload').hidden=false;$('upload-progress').value=0;
+  $('upload-state').textContent='Загрузка: '+file.name;
+  const xhr=new XMLHttpRequest();transfer=xhr;
+  xhr.open('POST','/api/upload');
+  xhr.setRequestHeader('Content-Type','application/octet-stream');
+  xhr.setRequestHeader('X-Filename',encodeURIComponent(file.name));
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){const percent=Math.floor(e.loaded/e.total*100);$('upload-progress').value=percent;$('upload-state').textContent=percent<100?`Загрузка: ${percent}%`:'Файл передан. Проверка WAV и сохранение…'}};
+  let savedName='';
+  try{
+    const result=await new Promise((resolve,reject)=>{
+      xhr.onload=()=>{try{const j=JSON.parse(xhr.responseText);if(xhr.status>=200&&xhr.status<300)resolve(j);else reject(Error(j.error||('Ошибка загрузки HTTP '+xhr.status)))}catch(e){reject(Error('Некорректный ответ платы (HTTP '+xhr.status+'). Обновите страницу и проверьте журнал UART.'))}};
+      xhr.onerror=()=>reject(Error('Соединение прервано. Проверьте Wi-Fi и повторите загрузку.'));
+      xhr.onabort=()=>reject(Error('Загрузка отменена.'));
+      xhr.send(file);
+    });
+    savedName=result.file;
+    $('upload-progress').value=100;$('upload-state').textContent='Записано на карту: '+result.file;
+    $('upload-file').value='';
+  }catch(e){$('upload-state').textContent=e.message}
+  finally{
+    uploading=false;transfer=null;$('cancel-upload').hidden=true;
+    await status();const listed=await files();
+    if(savedName&&listed&&!listed.includes(savedName))
+      $('upload-state').textContent='Плата подтвердила запись '+savedName+', но файл не попал в список. Нажмите «Обновить»; список ограничен 128 треками.';
+  }
+}
+$('upload-file').onchange=()=>{$('upload').disabled=!canUpload||!$('upload-file').files.length};
+$('upload').onclick=uploadFile;$('cancel-upload').onclick=()=>{if(transfer)transfer.abort()};
+$('format').onclick=formatCard;
+for(const id of [1,2]){
+  $('select-'+id).onchange=()=>{drafts[id]=$('select-'+id).value;renderPlayers()};
+  $('play-'+id).onclick=()=>playLine(id,$('select-'+id).value);
+  $('pause-'+id).onclick=()=>command({action:'pause',line:id});
+  $('stop-'+id).onclick=()=>command({action:'stop',line:id});
+  $('volume-'+id).oninput=()=>{$('level-'+id).textContent=$('volume-'+id).value+'%'};
+  $('volume-'+id).onchange=()=>command({action:'volume',line:id,value:Number($('volume-'+id).value)});
+}
+$('refresh').onclick=files;
+status().then(files);setInterval(status,1000);
+</script></html>

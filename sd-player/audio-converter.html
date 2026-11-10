@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Конвертер для SD-плеера</title>
+<style>
+body{margin:0;padding:24px;background:#101722;color:#eef4ff;font:17px system-ui}main{max-width:640px;margin:auto}section{margin-top:24px;padding:24px;border-radius:18px;background:#1c2838}p{line-height:1.6;color:#b9c7da}input{display:block;max-width:100%;margin:16px 0}button,a.download{display:inline-block;border:0;border-radius:10px;padding:13px 18px;background:#68dfb2;color:#09261d;font:inherit;text-decoration:none;cursor:pointer}button:disabled{opacity:.45;cursor:default}a[hidden]{display:none}#status{white-space:pre-line;overflow-wrap:anywhere}small{color:#b9c7da}
+</style>
+<main><h1>Конвертер для SD-плеера</h1><p>Выберите музыку и получите готовый файл: <b>WAV · PCM 16 бит · стерео · 44,1 кГц</b>.</p>
+<section><label for="file">Аудиофайл</label><input id="file" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.aac,.ogg,.opus"><button id="convert" disabled>Преобразовать в WAV</button><p id="status" role="status" aria-live="polite">Файл обрабатывается в вашем браузере и никуда не отправляется.</p><a id="download" class="download" hidden>Скачать WAV</a></section>
+<p>После преобразования скачайте файл и загрузите его через веб-интерфейс SD-плеера. Для старой прошивки используйте простое имя латиницей, например <b>music.wav</b>.</p><small>Поддержка исходных форматов зависит от браузера. Для длинных записей потребуется больше памяти; на компьютере конвертировать удобнее.</small></main>
+<script>
+const $=id=>document.getElementById(id);
+let outputUrl=null;
+function encodeWav(audio){
+  const frames=audio.length;
+  if(frames*4>0xffffffff-36)throw Error('Запись слишком длинная для обычного WAV.');
+  const buffer=new ArrayBuffer(44+frames*4),view=new DataView(buffer);
+  const text=(offset,value)=>{for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i))};
+  text(0,'RIFF');view.setUint32(4,36+frames*4,true);text(8,'WAVE');
+  text(12,'fmt ');view.setUint32(16,16,true);view.setUint16(20,1,true);
+  view.setUint16(22,2,true);view.setUint32(24,44100,true);
+  view.setUint32(28,44100*4,true);view.setUint16(32,4,true);view.setUint16(34,16,true);
+  text(36,'data');view.setUint32(40,frames*4,true);
+  const left=audio.getChannelData(0),right=audio.getChannelData(1);
+  for(let i=0;i<frames;i++){
+    for(let c=0;c<2;c++){
+      let value=(c?right:left)[i];
+      if(!Number.isFinite(value))value=0;
+      value=Math.max(-1,Math.min(1,value));
+      view.setInt16(44+i*4+c*2,Math.round(value*(value<0?32768:32767)),true);
+    }
+  }
+  return buffer;
+}
+function reset(){
+  if(outputUrl){URL.revokeObjectURL(outputUrl);outputUrl=null}
+  $('download').hidden=true;$('download').removeAttribute('href');
+}
+$('file').onchange=()=>{reset();$('convert').disabled=!$('file').files.length;$('status').textContent='Готов к преобразованию.'};
+$('convert').onclick=async()=>{
+  const file=$('file').files[0];if(!file)return;
+  reset();$('convert').disabled=$('file').disabled=true;
+  let context;
+  try{
+    const Audio=window.AudioContext||window.webkitAudioContext;
+    const Offline=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+    if(!Audio||!Offline)throw Error('Браузер не поддерживает обработку аудио. Откройте файл в свежем Chrome, Edge или Safari.');
+    context=new Audio();
+    $('status').textContent='Чтение и декодирование файла…';
+    const decoded=await context.decodeAudioData(await file.arrayBuffer());
+    const frames=Math.ceil(decoded.duration*44100);
+    if(!frames)throw Error('В файле нет аудиоданных.');
+    $('status').textContent='Преобразование в стерео 44,1 кГц…';
+    const offline=new Offline(2,frames,44100);
+    const source=offline.createBufferSource();source.buffer=decoded;
+    source.connect(offline.destination);source.start();
+    const rendered=await offline.startRendering();
+    $('status').textContent='Запись WAV PCM 16 бит…';
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const data=encodeWav(rendered);
+    outputUrl=URL.createObjectURL(new Blob([data],{type:'audio/wav'}));
+    const base=file.name.replace(/\.[^.]*$/,'').replace(/[^a-zA-Z0-9_-]+/g,'_').replace(/^_+|_+$/g,'')||'music';
+    $('download').href=outputUrl;$('download').download=base+'_44100_16bit.wav';
+    $('download').hidden=false;
+    $('status').textContent=`Готово! ${(data.byteLength/1048576).toFixed(1)} МБ · ${decoded.duration.toFixed(1)} с\nWAV PCM 16 бит · 2 канала · 44100 Гц`;
+  }catch(e){
+    $('status').textContent='Не удалось преобразовать файл. '+(e.name==='EncodingError'?'Браузер не распознал аудио. Попробуйте другой браузер или исходный файл.':e.message);
+  }finally{
+    if(context)await context.close().catch(()=>{});
+    $('convert').disabled=$('file').disabled=false;
+  }
+};
+</script>
+</html>

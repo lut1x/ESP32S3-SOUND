@@ -1,0 +1,172 @@
+#include "rtsp_conn.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <math.h>
+
+#include "audio_receiver.h"
+#include "ptp_clock.h"
+#include "settings.h"
+
+rtsp_conn_t *rtsp_conn_create(void) {
+  rtsp_conn_t *conn = calloc(1, sizeof(rtsp_conn_t));
+  if (!conn) {
+    return NULL;
+  }
+
+#ifdef CONFIG_AIRPLAY_SENDER_VOLUME_ONLY
+  // No receiver-level preset: the active sender owns volume. Do not play
+  // at an old client's level before the new client supplies its own level.
+  conn->volume_db = -144.0f;
+  conn->volume_q15 = 0;
+#else
+  // Load saved volume or use default
+  float saved_volume;
+  if (settings_get_volume(&saved_volume) == ESP_OK) {
+    conn->volume_db = saved_volume;
+    // Apply volume curve
+    if (saved_volume <= -30.0f) {
+      conn->volume_q15 = 0;
+    } else if (saved_volume >= 0.0f) {
+      conn->volume_q15 = 32768;
+    } else {
+      float normalized = (saved_volume + 30.0f) / 30.0f;
+      conn->volume_q15 = (int32_t)(normalized * normalized * 32768.0f);
+    }
+  } else {
+    conn->volume_db = -15.0f; // Half volume (midpoint of -30..0 dB range)
+    float normalized = (conn->volume_db + 30.0f) / 30.0f;
+    conn->volume_q15 = (int32_t)(normalized * normalized * 32768.0f);
+  }
+
+#endif
+
+  conn->data_socket = -1;
+  conn->control_socket = -1;
+  conn->event_socket = -1;
+
+  return conn;
+}
+
+void rtsp_conn_free(rtsp_conn_t *conn) {
+  if (!conn) {
+    return;
+  }
+
+  // Persist volume at disconnect
+#ifndef CONFIG_AIRPLAY_SENDER_VOLUME_ONLY
+  settings_persist_volume();
+#endif
+
+  // Cleanup any resources
+  rtsp_conn_cleanup(conn);
+
+  // Free HAP session if present
+  if (conn->hap_session) {
+    hap_session_free(conn->hap_session);
+    conn->hap_session = NULL;
+  }
+
+  free(conn);
+}
+
+void rtsp_conn_reset_stream(rtsp_conn_t *conn) {
+  if (!conn) {
+    return;
+  }
+
+  // Reset stream state but keep session alive
+  conn->stream_active = false;
+  conn->stream_paused = true; // Paused, not fully torn down
+
+  // Keep ports allocated for quick resume
+  // Don't clear: data_port, control_port, timing_port, event_port
+}
+
+void rtsp_conn_cleanup(rtsp_conn_t *conn) {
+  if (!conn) {
+    return;
+  }
+
+  // Note: audio_receiver_stop() is NOT called here — it is a global operation
+  // and must be managed by the caller (rtsp_server cleanup / handle_teardown)
+  // to avoid killing a new session's audio during client replacement.
+
+  // Close sockets
+  if (conn->data_socket >= 0) {
+    close(conn->data_socket);
+    conn->data_socket = -1;
+  }
+  if (conn->control_socket >= 0) {
+    close(conn->control_socket);
+    conn->control_socket = -1;
+  }
+  if (conn->event_socket >= 0) {
+    close(conn->event_socket);
+    conn->event_socket = -1;
+  }
+
+  // Reset stream state
+  conn->stream_active = false;
+  conn->stream_paused = false;
+  conn->data_port = 0;
+  conn->control_port = 0;
+  conn->timing_port = 0;
+  conn->event_port = 0;
+  conn->buffered_port = 0;
+
+  // Clear PTP clock for fresh sync on next connection
+  ptp_clock_clear();
+
+  // Reset encryption state
+  conn->encrypted_mode = false;
+}
+
+void rtsp_conn_set_volume(rtsp_conn_t *conn, float volume_db) {
+  if (!conn || !isfinite(volume_db)) {
+    return;
+  }
+
+  conn->volume_db = volume_db;
+
+#ifdef CONFIG_AIRPLAY_SENDER_VOLUME_ONLY
+  // AirPlay sends amplitude in dB, not a linear percentage. 0 dB is
+  // bit-exact unity; -144 is the protocol mute. Do not add a second curve
+  // or normalize/boost PCM past full scale.
+  if (volume_db <= -144.0f) {
+    conn->volume_q15 = 0;
+  } else if (volume_db >= 0.0f) {
+    conn->volume_q15 = 32768;
+  } else {
+    conn->volume_q15 = (int32_t)lroundf(powf(10.0f, volume_db / 20.0f) * 32768.0f);
+  }
+#else
+  // AirPlay volume: 0 dB = max, -30 dB = mute
+  // Use squared curve for better perceptual control
+  if (volume_db <= -30.0f) {
+    conn->volume_q15 = 0;
+  } else if (volume_db >= 0.0f) {
+    conn->volume_q15 = 32768;
+  } else {
+    // Map -30..0 to 0..1, then square for perceptual curve
+    float normalized = (volume_db + 30.0f) / 30.0f;
+    float curved = normalized * normalized;
+    conn->volume_q15 = (int32_t)(curved * 32768.0f);
+  }
+#endif
+
+  // Update the live cache/DAC. Sender-only mode never restores or persists it.
+  settings_set_volume(volume_db);
+}
+
+int32_t rtsp_conn_get_volume_q15(rtsp_conn_t *conn) {
+  if (!conn) {
+#ifdef CONFIG_AIRPLAY_SENDER_VOLUME_ONLY
+    return 0;
+#else
+    return 32768; // Default full volume
+#endif
+  }
+  return conn->volume_q15;
+}

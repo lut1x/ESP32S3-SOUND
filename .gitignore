@@ -1,0 +1,17 @@
+# Local build outputs and caches
+.pio/
+**/.pio/
+__pycache__/
+**/__pycache__/
+
+# Local editor settings
+.vscode/
+**/.vscode/
+
+# Build logs generated locally
+build*.log
+**/build*.log
+
+# Generated SDK configuration files
+sdkconfig
+sdkconfig.old
